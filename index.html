@@ -1,12 +1,487 @@
 <!DOCTYPE html>
 <html lang="pl">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>General Anesthesia | Orchestrator</title>
-  </head>
-  <body style="margin: 0; background: #080808;">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>General Anesthesia | BPM Orchestrator</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body style="margin: 0; background: #080808; overflow-x: hidden;">
     <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
-  </body>
+
+    <script type="text/babel">
+        // Wyciągamy hooki z globalnego obiektu React
+        const { useState, useEffect, useRef, useCallback } = React;
+
+        // ─── CONSTANTS ───────────────────────────────────────────────────────────────
+        const MIN_BPM = 40;
+        const MAX_BPM = 140;
+        const PHASE_DURATION_MS = 30000;
+        const LOOKAHEAD_SEC = 0.15;
+        const SCHEDULER_INTERVAL_MS = 25;
+        const TICK_MS = 50;
+
+        // ─── MASTER CLOCK ENGINE ─────────────────────────────────────────────────────
+        class BpmEngine {
+          constructor() {
+            this.ctx = null;
+            this.pulses = new Map();
+            this._timerID = null;
+            this._gridOrigin = null;
+          }
+
+          _ensureContext() {
+            if (!this.ctx) {
+              this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (this.ctx.state === "suspended") this.ctx.resume();
+          }
+
+          _click(when, gainNode) {
+            const osc = this.ctx.createOscillator();
+            const env = this.ctx.createGain();
+            osc.connect(env);
+            env.connect(gainNode);
+            osc.frequency.setValueAtTime(1200, when);
+            osc.frequency.exponentialRampToValueAtTime(300, when + 0.035);
+            env.gain.setValueAtTime(0.001, when);
+            env.gain.exponentialRampToValueAtTime(0.75, when + 0.003);
+            env.gain.exponentialRampToValueAtTime(0.001, when + 0.055);
+            osc.start(when);
+            osc.stop(when + 0.06);
+          }
+
+          _nextAlignedBeat(bpm, fromTime) {
+            if (this._gridOrigin === null) return fromTime + 0.05;
+            const interval = 60 / bpm;
+            const elapsed = fromTime - this._gridOrigin;
+            const nextBeatIdx = Math.ceil(elapsed / interval + 1e-6);
+            return this._gridOrigin + nextBeatIdx * interval;
+          }
+
+          _scheduler() {
+            if (!this.ctx) return;
+            const now = this.ctx.currentTime;
+            const horizon = now + LOOKAHEAD_SEC;
+            for (const [, p] of this.pulses) {
+              if (!p.active) continue;
+              const interval = 60 / p.bpm;
+              while (p.nextTime <= horizon) {
+                if (p.nextTime >= now - 0.005) this._click(p.nextTime, p.gainNode);
+                p.nextTime += interval;
+              }
+            }
+          }
+
+          _startLoop() {
+            if (this._timerID) return;
+            const loop = () => {
+              this._scheduler();
+              this._timerID = setTimeout(loop, SCHEDULER_INTERVAL_MS);
+            };
+            loop();
+          }
+
+          addPulse(id, bpm) {
+            this._ensureContext();
+            const now = this.ctx.currentTime;
+            if (this._gridOrigin === null) this._gridOrigin = now;
+
+            const gainNode = this.ctx.createGain();
+            gainNode.gain.setValueAtTime(1, now);
+            gainNode.connect(this.ctx.destination);
+
+            const nextTime = this._nextAlignedBeat(bpm, now);
+            this.pulses.set(id, { bpm, active: true, gainNode, nextTime });
+            this._startLoop();
+          }
+
+          stopPulse(id) {
+            const p = this.pulses.get(id);
+            if (!p) return;
+            p.active = false;
+            const t = this.ctx.currentTime;
+            p.gainNode.gain.cancelScheduledValues(t);
+            p.gainNode.gain.setTargetAtTime(0, t, 0.03);
+            setTimeout(() => { try { p.gainNode.disconnect(); } catch {} this.pulses.delete(id); }, 300);
+          }
+
+          fadePulse(id, durationMs = 5000) {
+            const p = this.pulses.get(id);
+            if (!p) return;
+            const t = this.ctx.currentTime;
+            p.gainNode.gain.cancelScheduledValues(t);
+            p.gainNode.gain.setValueAtTime(p.gainNode.gain.value, t);
+            p.gainNode.gain.linearRampToValueAtTime(0, t + durationMs / 1000);
+            setTimeout(() => {
+              p.active = false;
+              try { p.gainNode.disconnect(); } catch {}
+              this.pulses.delete(id);
+            }, durationMs + 200);
+          }
+
+          setBpm(id, bpm) {
+            const p = this.pulses.get(id);
+            if (!p) return;
+            const clamped = Math.max(MIN_BPM, Math.min(MAX_BPM, bpm));
+            p.bpm = clamped;
+            if (this.ctx && p.nextTime < this.ctx.currentTime) {
+              p.nextTime = this._nextAlignedBeat(clamped, this.ctx.currentTime);
+            }
+          }
+
+          getActivePulses() {
+            return [...this.pulses.entries()]
+              .filter(([, p]) => p.active)
+              .map(([id, p]) => ({ id, bpm: p.bpm }));
+          }
+
+          resetGrid() { this._gridOrigin = null; }
+
+          destroy() {
+            if (this._timerID) clearTimeout(this._timerID);
+            this._timerID = null;
+            if (this.ctx) this.ctx.close();
+          }
+        }
+
+        // ─── EQUALIZATION LOGIC ───────────────────────────────────────────────────────
+        class EqualizationLogic {
+          constructor(engine, onUpdate, onPhaseChange, onComplete) {
+            this.engine = engine;
+            this.onUpdate = onUpdate;
+            this.onPhaseChange = onPhaseChange;
+            this.onComplete = onComplete;
+            this._interval = null;
+            this.phase = 0;
+          }
+
+          _kMeans(values, k) {
+            k = Math.min(k, values.length);
+            if (k === 1) return [values.reduce((a, b) => a + b, 0) / values.length];
+            const sorted = [...values].sort((a, b) => a - b);
+            let centroids = Array.from({ length: k }, (_, i) =>
+              sorted[Math.round((i / (k - 1)) * (sorted.length - 1))]
+            );
+            for (let iter = 0; iter < 40; iter++) {
+              const buckets = Array.from({ length: k }, () => []);
+              for (const v of values) {
+                let best = 0, bestD = Infinity;
+                centroids.forEach((c, i) => { const d = Math.abs(v - c); if (d < bestD) { bestD = d; best = i; } });
+                buckets[best].push(v);
+              }
+              const next = centroids.map((c, i) =>
+                buckets[i].length ? buckets[i].reduce((a, b) => a + b, 0) / buckets[i].length : c
+              );
+              if (next.every((v, i) => Math.abs(v - centroids[i]) < 0.001)) break;
+              centroids = next;
+            }
+            return centroids.sort((a, b) => a - b);
+          }
+
+          _assign(val, centroids) {
+            let best = 0, bestD = Infinity;
+            centroids.forEach((c, i) => { const d = Math.abs(val - c); if (d < bestD) { bestD = d; best = i; } });
+            return best;
+          }
+
+          _ease(t) {
+            t = Math.max(0, Math.min(1, t));
+            return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+          }
+
+          start(initialBpms) {
+            const ids = [...initialBpms.keys()];
+            const vals = ids.map(id => initialBpms.get(id));
+            const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+            this.finalTarget = Math.round(avg);
+            this._ids = ids;
+
+            const c3 = this._kMeans(vals, Math.min(3, ids.length));
+            const c2 = this._kMeans(vals, Math.min(2, ids.length));
+
+            this._phase1Targets = new Map(ids.map(id => [id, c3[this._assign(initialBpms.get(id), c3)]]));
+            this._phase2Targets = new Map(ids.map(id => [id, c2[this._assign(initialBpms.get(id), c2)]]));
+
+            this._startPhase(1, new Map(initialBpms));
+            return { c3: c3.map(v => Math.round(v)), c2: c2.map(v => Math.round(v)), final: this.finalTarget };
+          }
+
+          _startPhase(phase, fromBpms) {
+            if (this._interval) clearInterval(this._interval);
+            this.phase = phase;
+            this._phaseStart = performance.now();
+            this._fromBpms = fromBpms;
+            this._toBpms =
+              phase === 1 ? this._phase1Targets :
+              phase === 2 ? this._phase2Targets :
+              new Map(this._ids.map(id => [id, this.finalTarget]));
+
+            this.onPhaseChange(phase);
+
+            this._interval = setInterval(() => {
+              const elapsed = performance.now() - this._phaseStart;
+              const rawT = elapsed / PHASE_DURATION_MS;
+              const t = this._ease(rawT);
+
+              const current = new Map();
+              for (const id of this._ids) {
+                const from = this._fromBpms.get(id);
+                const to = this._toBpms.get(id);
+                const bpm = from + (to - from) * t;
+                current.set(id, bpm);
+                this.engine.setBpm(id, bpm);
+              }
+              this.onUpdate(current, phase, Math.min(rawT, 1));
+
+              if (rawT >= 1) {
+                for (const id of this._ids) this.engine.setBpm(id, this._toBpms.get(id));
+                const snap = new Map(this._toBpms);
+                if (phase < 3) {
+                  this._startPhase(phase + 1, snap);
+                } else {
+                  clearInterval(this._interval);
+                  this.onComplete(this.finalTarget);
+                }
+              }
+            }, TICK_MS);
+          }
+
+          stop() {
+            if (this._interval) clearInterval(this._interval);
+            this.phase = 0;
+          }
+        }
+
+        // ─── HELPERS ─────────────────────────────────────────────────────────────────
+        const uid = () => Math.random().toString(36).slice(2, 8).toUpperCase();
+        const PHASE_META = [
+          null,
+          { label: "PHASE I — CLUSTERING",    color: "#7df9d0" },
+          { label: "PHASE II — MERGING",      color: "#f9c74f" },
+          { label: "PHASE III — SINGULARITY", color: "#f94144" },
+          { label: "EQUALIZED",               color: "#00ff88" },
+        ];
+
+        // ─── MICRO-COMPONENTS ──────────────────────────────────────────────────────────
+        function Label({ children }) {
+          return <div style={{ fontSize: 9, color: "#333", letterSpacing: "0.25em", marginBottom: 10 }}>{children}</div>;
+        }
+        function FieldRow({ label, children }) {
+          return (
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 9, color: "#444", marginBottom: 4, letterSpacing: "0.18em" }}>{label}</div>
+              {children}
+            </div>
+          );
+        }
+        function Btn({ label, color, onClick, title, disabled }) {
+          return (
+            <button onClick={onClick} title={title} disabled={disabled} style={{
+              background: "transparent",
+              border: `1px solid ${disabled ? "#181818" : color}`,
+              color: disabled ? "#222" : color,
+              width: 30, height: 26, fontSize: 11,
+              cursor: disabled ? "not-allowed" : "pointer",
+              fontFamily: "inherit",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              opacity: disabled ? 0.4 : 1,
+              transition: "all .12s", flexShrink: 0,
+            }}>{label}</button>
+          );
+        }
+
+        // ─── MAIN APP COMPONENT ──────────────────────────────────────────────────────
+        function App() {
+          const [entries, setEntries]         = useState([]);
+          const [nameInput, setNameInput]     = useState("");
+          const [tempoInput, setTempoInput]   = useState("");
+          const [inputError, setInputError]   = useState("");
+          const [activePulses, setActivePulses] = useState(new Set());
+          const [fadingPulses, setFadingPulses] = useState(new Set());
+          const [liveBpms, setLiveBpms]         = useState(new Map());
+          const [editingId, setEditingId]   = useState(null);
+          const [editName, setEditName]     = useState("");
+          const [editTempo, setEditTempo]   = useState("");
+          const [editError, setEditError]   = useState("");
+          const [eqPhase, setEqPhase]       = useState(0);
+          const [eqProgress, setEqProgress] = useState(0);
+          const [eqActive, setEqActive]     = useState(false);
+          const [eqDone, setEqDone]         = useState(false);
+          const [finalBpm, setFinalBpm]     = useState(null);
+          const [clusterInfo, setClusterInfo] = useState(null);
+          const [log, setLog]   = useState([]);
+          const [clock, setClock] = useState("");
+
+          const engineRef = useRef(null);
+          const eqRef     = useRef(null);
+
+          useEffect(() => {
+            engineRef.current = new BpmEngine();
+            const t = setInterval(() => setClock(new Date().toTimeString().slice(0, 8)), 1000);
+            return () => { engineRef.current?.destroy(); clearInterval(t); };
+          }, []);
+
+          const pushLog = useCallback((msg, color = "#888") => {
+            setLog(p => [{ ts: new Date().toTimeString().slice(0, 8), msg, color }, ...p].slice(0, 60));
+          }, []);
+
+          const handleAdd = () => {
+            const name = nameInput.trim().toUpperCase();
+            if (!name) { setInputError("ID required"); return; }
+            if (entries.find(e => e.name === name)) { setInputError("ID exists"); return; }
+            const bpm = parseInt(tempoInput);
+            if (isNaN(bpm) || bpm < MIN_BPM || bpm > MAX_BPM) { setInputError(`${MIN_BPM}-${MAX_BPM} BPM`); return; }
+            
+            const entry = { id: uid(), name, bpm };
+            setEntries(p => [...p, entry]);
+            pushLog(`REGISTERED ${name} @ ${bpm} BPM`, "#7df9d0");
+            setNameInput(""); setTempoInput(""); setInputError("");
+          };
+
+          const handlePlay = entry => {
+            if (activePulses.has(entry.id)) return;
+            engineRef.current.addPulse(entry.id, entry.bpm);
+            setActivePulses(p => new Set([...p, entry.id]));
+            setLiveBpms(p => new Map([...p, [entry.id, entry.bpm]]));
+            pushLog(`PULSE ON ${entry.name}`, "#7df9d0");
+          };
+
+          const handleStop = entry => {
+            engineRef.current.stopPulse(entry.id);
+            setActivePulses(p => { const s = new Set(p); s.delete(entry.id); return s; });
+            setLiveBpms(p => { const m = new Map(p); m.delete(entry.id); return m; });
+            pushLog(`PULSE OFF ${entry.name}`, "#f94144");
+          };
+
+          const handleFade = entry => {
+            if (fadingPulses.has(entry.id)) return;
+            engineRef.current.fadePulse(entry.id, 5000);
+            setFadingPulses(p => new Set([...p, entry.id]));
+            setTimeout(() => {
+                setActivePulses(p => { const s = new Set(p); s.delete(entry.id); return s; });
+                setFadingPulses(p => { const s = new Set(p); s.delete(entry.id); return s; });
+            }, 5500);
+          };
+
+          const handleEqualize = () => {
+            if (eqActive) {
+                eqRef.current?.stop();
+                setEqActive(false); setEqPhase(0);
+                return;
+            }
+            const active = engineRef.current.getActivePulses();
+            if (active.length < 2) return;
+            const initial = new Map(active.map(({ id, bpm }) => [id, bpm]));
+            const eq = new EqualizationLogic(
+                engineRef.current,
+                (bpms, phase, progress) => { setLiveBpms(new Map(bpms)); setEqPhase(phase); setEqProgress(progress); },
+                phase => pushLog(PHASE_META[phase]?.label, PHASE_META[phase]?.color),
+                done => { setFinalBpm(done); setEqActive(false); setEqDone(true); setEqPhase(4); }
+            );
+            eqRef.current = eq;
+            setClusterInfo(eq.start(initial));
+            setEqActive(true);
+          };
+
+          const activeBpmsArr = [...activePulses].map(id => liveBpms.get(id) || 0);
+          const avgBpm = activeBpmsArr.length ? Math.round(activeBpmsArr.reduce((a, b) => a + b, 0) / activeBpmsArr.length) : null;
+          const phaseMeta = PHASE_META[eqPhase];
+
+          return (
+            <div style={S.root}>
+              <header style={S.header}>
+                <div>
+                  <div style={S.sub}>ANTHROPIC SYSTEMS · PERFORMANCE TOOL</div>
+                  <div style={S.title}>GENERAL ANESTHESIA / ORCHESTRATOR</div>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <div style={S.clock}>{clock || "00:00:00"}</div>
+                </div>
+              </header>
+
+              <div style={S.body}>
+                <aside style={S.aside}>
+                  <section style={S.panel}>
+                    <Label>◈ NODE REGISTRATION</Label>
+                    <FieldRow label="ID">
+                      <input style={S.input} value={nameInput} onChange={e => setNameInput(e.target.value.toUpperCase())} placeholder="7X22" />
+                    </FieldRow>
+                    <FieldRow label="BPM">
+                      <input style={S.input} type="number" value={tempoInput} onChange={e => setTempoInput(e.target.value)} placeholder="72" />
+                    </FieldRow>
+                    {inputError && <div style={S.err}>{inputError}</div>}
+                    <button style={S.btnWhite} onClick={handleAdd}>+ REGISTER</button>
+                  </section>
+
+                  <section style={S.panel}>
+                    <Label>◈ EQUALIZATION</Label>
+                    <button style={{...S.btnEq, borderColor: eqActive ? "#f94144" : "#00ff88", color: eqActive ? "#f94144" : "#00ff88"}} onClick={handleEqualize}>
+                      {eqActive ? "■ ABORT" : "⟳ EQUALIZE"}
+                    </button>
+                    {eqActive && phaseMeta && (
+                        <div style={{marginTop:10}}>
+                            <div style={{fontSize:9, color: phaseMeta.color}}>{phaseMeta.label}</div>
+                            <div style={S.track}><div style={{...S.fill, width:`${eqProgress*100}%`, background:phaseMeta.color}} /></div>
+                        </div>
+                    )}
+                  </section>
+
+                  <section style={{...S.panel, flex:1, overflow:"hidden"}}>
+                    <Label>◈ SYSTEM LOG</Label>
+                    <div style={{fontSize:10}}>
+                      {log.map((l, i) => <div key={i} style={{color:l.color, marginBottom:4}}>[{l.ts}] {l.msg}</div>)}
+                    </div>
+                  </section>
+                </aside>
+
+                <main style={S.main}>
+                  {entries.map(entry => {
+                    const isActive = activePulses.has(entry.id);
+                    const liveBpm = liveBpms.get(entry.id) || entry.bpm;
+                    return (
+                      <div key={entry.id} style={{...S.row, borderColor: isActive ? "#00ff88" : "#222"}}>
+                        <div style={{width:80, fontWeight:"bold"}}>{entry.name}</div>
+                        <div style={{flex:1}}>
+                           <div style={{fontSize:18}}>{Math.round(liveBpm)} <span style={{fontSize:9}}>BPM</span></div>
+                        </div>
+                        <div style={{display:"flex", gap:5}}>
+                          {!isActive ? <Btn label="▶" color="#00ff88" onClick={() => handlePlay(entry)} /> : <Btn label="◼" color="#f94144" onClick={() => handleStop(entry)} />}
+                          {isActive && <Btn label="↓" color="#f9c74f" onClick={() => handleFade(entry)} />}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </main>
+              </div>
+              <style>{`@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }`}</style>
+            </div>
+          );
+        }
+
+        const S = {
+          root: { fontFamily: "monospace", background: "#080808", color: "#c8c8c8", minHeight: "100vh", display: "flex", flexDirection: "column" },
+          header: { borderBottom: "1px solid #161616", padding: "10px 20px", display: "flex", justifyContent: "space-between", alignItems: "center" },
+          sub: { fontSize: 9, color: "#444" },
+          title: { fontSize: 14, color: "#eee" },
+          clock: { fontSize: 20, color: "#fff" },
+          body: { display: "flex", flex: 1 },
+          aside: { width: 250, borderRight: "1px solid #141414", display: "flex", flexDirection: "column" },
+          panel: { padding: 15, borderBottom: "1px solid #141414" },
+          input: { width: "100%", background: "#000", border: "1px solid #333", color: "#fff", padding: 5, marginBottom: 5 },
+          btnWhite: { width: "100%", background: "#fff", border: "none", padding: 8, fontWeight: "bold", cursor: "pointer" },
+          btnEq: { width: "100%", background: "transparent", border: "1px solid", padding: 8, cursor: "pointer" },
+          err: { color: "#f94144", fontSize: 10, marginBottom: 5 },
+          main: { flex: 1, padding: 20, overflowY: "auto" },
+          row: { display: "flex", alignItems: "center", padding: 15, border: "1px solid", marginBottom: 10, background: "#0c0c0c" },
+          track: { background: "#111", height: 2, marginTop: 5 },
+          fill: { height: "100%" }
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
 </html>
