@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="pl">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -252,14 +252,14 @@
             /* ── ADD NODE ── */
             const doAdd = () => {
                 const name = nameIn.trim().toUpperCase();
-                if (!name)                              { setAddErr('ID wymagane'); return; }
-                if (!/^[A-Z0-9]+$/.test(name))         { setAddErr('Tylko litery i cyfry'); return; }
-                if (nodes.find(n => n.name === name))   { setAddErr('ID już istnieje'); return; }
+                if (!name)                              { setAddErr('ID required'); return; }
+                if (!/^[A-Z0-9]+$/.test(name))         { setAddErr('Letters and numbers only'); return; }
+                if (nodes.find(n => n.name === name))   { setAddErr('ID already exists'); return; }
                 const bpm = parseInt(bpmIn);
                 if (isNaN(bpm)||bpm<MIN_BPM||bpm>MAX_BPM) { setAddErr(`BPM: ${MIN_BPM}–${MAX_BPM}`); return; }
                 const node = { id: Math.random().toString(36).slice(2,8).toUpperCase(), name, bpm };
                 setNodes(p => [...p, node]);
-                log$(`DODANO ${name} @ ${bpm} BPM`, '#7df9d0');
+                log$(`REGISTERED ${name} @ ${bpm} BPM`, '#7df9d0');
                 setNameIn(''); setBpmIn(''); setAddErr('');
             };
 
@@ -269,14 +269,14 @@
                 eng.current.add(node.id, node.bpm);
                 setPlaying(p => new Set([...p, node.id]));
                 setLive(p => new Map([...p, [node.id, node.bpm]]));
-                log$(`PULS ON  ${node.name} @ ${node.bpm}`, '#7df9d0');
+                log$(`PULSE ON  ${node.name} @ ${node.bpm}`, '#7df9d0');
             };
             const doStop = node => {
                 eng.current.stop(node.id);
                 setPlaying(p => { const s=new Set(p); s.delete(node.id); return s; });
                 setFading(p =>  { const s=new Set(p); s.delete(node.id); return s; });
                 setLive(p =>    { const m=new Map(p); m.delete(node.id); return m; });
-                log$(`PULS OFF ${node.name}`, '#f94144');
+                log$(`PULSE OFF ${node.name}`, '#f94144');
             };
             const doFade = node => {
                 if (fading.has(node.id)) return;
@@ -298,8 +298,8 @@
             const cancelEdit = () => { setEditId(null); setEditErr(''); };
             const saveEdit = node => {
                 const name = editNm.trim().toUpperCase();
-                if (!name || !/^[A-Z0-9]+$/.test(name))            { setEditErr('Błędne ID'); return; }
-                if (nodes.find(n => n.name===name && n.id!==node.id)) { setEditErr('ID zajęte'); return; }
+                if (!name || !/^[A-Z0-9]+$/.test(name))            { setEditErr('Invalid ID'); return; }
+                if (nodes.find(n => n.name===name && n.id!==node.id)) { setEditErr('ID taken'); return; }
                 const bpm = parseInt(editBpm);
                 if (isNaN(bpm)||bpm<MIN_BPM||bpm>MAX_BPM)          { setEditErr(`${MIN_BPM}–${MAX_BPM}`); return; }
                 setNodes(p => p.map(n => n.id===node.id ? {...n, name, bpm} : n));
@@ -307,7 +307,7 @@
                     eng.current.setBpm(node.id, bpm);
                     setLive(p => new Map([...p, [node.id, bpm]]));
                 }
-                log$(`EDYCJA ${node.name} → ${name} @ ${bpm} BPM`, '#7df9d0');
+                log$(`UPDATED ${node.name} → ${name} @ ${bpm} BPM`, '#7df9d0');
                 setEditId(null);
             };
 
@@ -316,7 +316,7 @@
                 if (playing.has(node.id)) doStop(node);
                 setNodes(p => p.filter(n => n.id !== node.id));
                 if (editId === node.id) setEditId(null);
-                log$(`USUNIĘTO ${node.name}`, '#f94144');
+                log$(`DELETED ${node.name}`, '#f94144');
             };
 
             /* ── EQUALIZE ── */
@@ -324,11 +324,11 @@
                 if (eqOn) {
                     eq.current?.abort();
                     setEqOn(false); setEqProg(0);
-                    log$('EQUALIZACJA PRZERWANA', '#f94144');
+                    log$('EQUALIZATION ABORTED', '#f94144');
                     return;
                 }
                 const cur = eng.current.active();
-                if (cur.length < 1) { log$('Brak aktywnych pulsów', '#f94144'); return; }
+                if (cur.length < 1) { log$('No active pulses', '#f94144'); return; }
                 const init = new Map(cur.map(({id,bpm}) => [id,bpm]));
                 eq.current = new Equalizer(
                     eng.current,
@@ -341,7 +341,7 @@
                 );
                 eq.current.start(init);
                 setEqOn(true); setEqDone(false); setEqProg(0);
-                log$(`EQUALIZACJA → ${TARGET_BPM} BPM / 60s`, '#7df9d0');
+                log$(`EQUALIZATION → ${TARGET_BPM} BPM / 60s`, '#7df9d0');
             };
 
             /* ── RENDER ── */
@@ -362,7 +362,7 @@
                         <div style={{ textAlign:'right' }}>
                             <div style={{ fontSize:20, color:'#e8e8e8', fontVariantNumeric:'tabular-nums' }}>{clock||'00:00:00'}</div>
                             <div style={{ fontSize:9, color:'#333', letterSpacing:'0.2em', marginTop:2 }}>
-                                {playing.size} AKTYWNYCH{avg ? ` · AVG ${avg} BPM` : ''}
+                                {playing.size} ACTIVE{avg ? ` · AVG ${avg} BPM` : ''}
                             </div>
                         </div>
                     </header>
@@ -374,8 +374,8 @@
 
                             {/* registration */}
                             <section style={css.sec}>
-                                <SLabel>◈ REJESTRACJA WĘZŁA</SLabel>
-                                <Field label="ID UCZESTNIKA">
+                                <SLabel>◈ NODE REGISTRATION</SLabel>
+                                <Field label="PARTICIPANT ID">
                                     <input style={css.inp} value={nameIn}
                                         onChange={e => { setNameIn(e.target.value.toUpperCase()); setAddErr(''); }}
                                         onKeyDown={e => e.key==='Enter' && doAdd()}
@@ -388,24 +388,24 @@
                                         placeholder="72" min={MIN_BPM} max={MAX_BPM} />
                                 </Field>
                                 {addErr && <div style={css.err}>▲ {addErr}</div>}
-                                <button style={css.btnW} onClick={doAdd}>+ ZAREJESTRUJ</button>
+                                <button style={css.btnW} onClick={doAdd}>+ REGISTER</button>
                             </section>
 
                             {/* equalize */}
                             <section style={css.sec}>
-                                <SLabel>◈ EQUALIZACJA → {TARGET_BPM} BPM / 60s</SLabel>
+                                <SLabel>◈ EQUALIZATION → {TARGET_BPM} BPM / 60s</SLabel>
                                 <button style={{
                                     ...css.btnE,
                                     borderColor: eqOn ? '#f94144' : '#00ff88',
                                     color:       eqOn ? '#f94144' : '#00ff88',
                                     background:  eqOn ? 'rgba(249,65,68,.07)' : 'rgba(0,255,136,.04)',
                                 }} onClick={doEq}>
-                                    {eqOn ? '■ PRZERWIJ' : '⟳ EQUALIZE'}
+                                    {eqOn ? '■ ABORT' : '⟳ EQUALIZE'}
                                 </button>
                                 {(eqOn || eqDone) && (
                                     <div style={{ marginTop:10 }}>
                                         <div style={{ fontSize:9, letterSpacing:'0.15em', marginBottom:5, color: eqDone?'#00ff88':'#f9c74f' }}>
-                                            {eqDone ? `✦ UKOŃCZONO @ ${TARGET_BPM} BPM` : `▶ ZBIEŻNOŚĆ → ${TARGET_BPM} BPM`}
+                                            {eqDone ? `✦ COMPLETE @ ${TARGET_BPM} BPM` : `▶ CONVERGING → ${TARGET_BPM} BPM`}
                                         </div>
                                         <div style={css.trk}>
                                             <div style={{ ...css.fill, width:`${eqProg*100}%`, background: eqDone?'#00ff88':'#f9c74f' }} />
@@ -419,7 +419,7 @@
 
                             {/* log */}
                             <section style={{ ...css.sec, flex:1, overflow:'hidden', display:'flex', flexDirection:'column', borderBottom:'none' }}>
-                                <SLabel>◈ LOG SYSTEMOWY</SLabel>
+                                <SLabel>◈ SYSTEM LOG</SLabel>
                                 <div style={{ flex:1, overflowY:'auto' }}>
                                     {log.map((l,i) => (
                                         <div key={i} style={{ display:'flex', gap:6, marginBottom:4, opacity: Math.max(0.18, 1-i*0.04) }}>
@@ -436,7 +436,7 @@
                             {nodes.length === 0 && (
                                 <div style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', height:'60vh', color:'#222', fontSize:11, letterSpacing:'0.2em' }}>
                                     <div style={{ fontSize:32, marginBottom:8 }}>⊙</div>
-                                    <div>BRAK WĘZŁÓW</div>
+                                    <div>NO NODES REGISTERED</div>
                                 </div>
                             )}
 
@@ -473,8 +473,8 @@
                                                     min={MIN_BPM} max={MAX_BPM}
                                                 />
                                                 {editErr && <span style={{ color:'#f94144', fontSize:10 }}>▲ {editErr}</span>}
-                                                <Btn label="✓" color="#00ff88" onClick={() => saveEdit(node)}  title="Zapisz (Enter)" />
-                                                <Btn label="✕" color="#f94144" onClick={cancelEdit}            title="Anuluj (Esc)" />
+                                                <Btn label="✓" color="#00ff88" onClick={() => saveEdit(node)}  title="Save (Enter)" />
+                                                <Btn label="✕" color="#f94144" onClick={cancelEdit}            title="Cancel (Esc)" />
                                             </div>
                                         ) : (
                                             /* ─── NORMAL MODE ─── */
@@ -509,18 +509,18 @@
                                                 <div style={{ display:'flex', gap:4, flexShrink:0, alignItems:'center' }}>
                                                     {/* play / stop / fade */}
                                                     {!isOn
-                                                        ? <Btn label="▶" color="#00ff88" onClick={() => doPlay(node)} title="Odtwórz" />
+                                                        ? <Btn label="▶" color="#00ff88" onClick={() => doPlay(node)} title="Play" />
                                                         : <>
-                                                            <Btn label="◼" color="#f94144" onClick={() => doStop(node)} title="Zatrzymaj" />
-                                                            <Btn label={isFad?'…':'↓'} color="#f9c74f" disabled={isFad} onClick={() => doFade(node)} title="Wycisz" />
+                                                            <Btn label="◼" color="#f94144" onClick={() => doStop(node)} title="Stop" />
+                                                            <Btn label={isFad?'…':'↓'} color="#f9c74f" disabled={isFad} onClick={() => doFade(node)} title="Fade" />
                                                           </>
                                                     }
                                                     {/* divider */}
                                                     <div style={{ width:1, height:18, background:'#1e1e1e', margin:'0 2px' }} />
                                                     {/* edit */}
-                                                    <Btn label="✎" color="#7df9d0" onClick={() => startEdit(node)} title="Edytuj" w={26} />
+                                                    <Btn label="✎" color="#7df9d0" onClick={() => startEdit(node)} title="Edit" w={26} />
                                                     {/* delete */}
-                                                    <Btn label="✕" color="#555"    onClick={() => doDelete(node)}  title="Usuń"   w={26} />
+                                                    <Btn label="✕" color="#555"    onClick={() => doDelete(node)}  title="Delete"   w={26} />
                                                 </div>
                                             </>
                                         )}
@@ -533,9 +533,9 @@
                     {/* STATUS BAR */}
                     <footer style={css.sbar}>
                         {[
-                            { k:'WĘZŁY',     v: nodes.length,   c:'#555'    },
-                            { k:'AKTYWNE',   v: playing.size,   c:'#00ff88' },
-                            { k:'WYCISZANE', v: fading.size,    c:'#f9c74f' },
+                            { k:'NODES',     v: nodes.length,   c:'#555'    },
+                            { k:'ACTIVE',   v: playing.size,   c:'#00ff88' },
+                            { k:'FADING', v: fading.size,    c:'#f9c74f' },
                             eqOn ? { k:'EQ', v:`${Math.round(eqProg*100)}%`, c:'#f9c74f' } : null,
                         ].filter(Boolean).map(x => (
                             <div key={x.k} style={{ display:'flex', gap:6, alignItems:'baseline' }}>
