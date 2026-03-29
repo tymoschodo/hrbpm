@@ -7,576 +7,520 @@
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background: #080808; font-family: 'Courier New', Courier, monospace; }
+        input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; }
+        input[type=number] { -moz-appearance: textfield; }
+        ::-webkit-scrollbar { width: 3px; }
+        ::-webkit-scrollbar-track { background: #090909; }
+        ::-webkit-scrollbar-thumb { background: #222; }
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.15} }
+    </style>
 </head>
-<body style="margin: 0; background: #080808; overflow-x: hidden;">
+<body>
     <div id="root"></div>
-
     <script type="text/babel">
         const { useState, useEffect, useRef, useCallback } = React;
 
         const MIN_BPM = 40;
         const MAX_BPM = 140;
         const TARGET_BPM = 50;
-        const EQ_DURATION_MS = 60000; // 60 sekund do osiągnięcia 50 BPM
+        const EQ_DURATION_MS = 60000;
         const LOOKAHEAD_SEC = 0.15;
-        const SCHEDULER_INTERVAL_MS = 25;
+        const SCHED_MS = 25;
         const TICK_MS = 50;
 
-        // ─── MASTER CLOCK ENGINE ─────────────────────────────────────────────────────
-        // Wszystkie pulsy dzielą wspólny grid — nowy puls startuje na najbliższym
-        // uderzeniu siatki, żeby nie było przesunięcia fazowego.
+        /* ═══════════════════════════════════════════════════════
+           AUDIO ENGINE
+           All pulses share one grid origin so they phase-lock.
+        ═══════════════════════════════════════════════════════ */
         class BpmEngine {
             constructor() {
                 this.ctx = null;
                 this.pulses = new Map();
-                this._timerID = null;
-                this._gridOrigin = null;
+                this._timer = null;
+                this._origin = null;
             }
-
-            _ensureContext() {
+            _boot() {
                 if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)();
-                if (this.ctx.state === "suspended") this.ctx.resume();
+                if (this.ctx.state === 'suspended') this.ctx.resume();
             }
-
-            _click(when, gainNode) {
-                const osc = this.ctx.createOscillator();
-                const env = this.ctx.createGain();
-                osc.connect(env);
-                env.connect(gainNode);
-                osc.frequency.setValueAtTime(1200, when);
-                osc.frequency.exponentialRampToValueAtTime(300, when + 0.035);
-                env.gain.setValueAtTime(0.001, when);
-                env.gain.exponentialRampToValueAtTime(0.75, when + 0.003);
-                env.gain.exponentialRampToValueAtTime(0.001, when + 0.055);
-                osc.start(when);
-                osc.stop(when + 0.06);
+            _click(when, gain) {
+                const o = this.ctx.createOscillator();
+                const g = this.ctx.createGain();
+                o.connect(g); g.connect(gain);
+                o.frequency.setValueAtTime(1200, when);
+                o.frequency.exponentialRampToValueAtTime(300, when + 0.035);
+                g.gain.setValueAtTime(0.001, when);
+                g.gain.exponentialRampToValueAtTime(0.75, when + 0.003);
+                g.gain.exponentialRampToValueAtTime(0.001, when + 0.055);
+                o.start(when); o.stop(when + 0.06);
             }
-
-            _nextAlignedBeat(bpm, fromTime) {
-                if (this._gridOrigin === null) return fromTime + 0.05;
-                const interval = 60 / bpm;
-                const elapsed = fromTime - this._gridOrigin;
-                const nextBeatIdx = Math.ceil(elapsed / interval + 1e-6);
-                return this._gridOrigin + nextBeatIdx * interval;
+            _aligned(bpm, from) {
+                if (this._origin === null) return from + 0.05;
+                const iv = 60 / bpm;
+                const idx = Math.ceil((from - this._origin) / iv + 1e-6);
+                return this._origin + idx * iv;
             }
-
-            _scheduler() {
+            _sched() {
                 if (!this.ctx) return;
                 const now = this.ctx.currentTime;
-                const horizon = now + LOOKAHEAD_SEC;
+                const hor = now + LOOKAHEAD_SEC;
                 for (const [, p] of this.pulses) {
                     if (!p.active) continue;
-                    const interval = 60 / p.bpm;
-                    while (p.nextTime <= horizon) {
-                        if (p.nextTime >= now - 0.005) this._click(p.nextTime, p.gainNode);
-                        p.nextTime += interval;
+                    const iv = 60 / p.bpm;
+                    while (p.next <= hor) {
+                        if (p.next >= now - 0.005) this._click(p.next, p.gain);
+                        p.next += iv;
                     }
                 }
             }
-
-            _startLoop() {
-                if (this._timerID) return;
-                const loop = () => {
-                    this._scheduler();
-                    this._timerID = setTimeout(loop, SCHEDULER_INTERVAL_MS);
-                };
-                loop();
+            _loop() {
+                if (this._timer) return;
+                const run = () => { this._sched(); this._timer = setTimeout(run, SCHED_MS); };
+                run();
             }
-
-            addPulse(id, bpm) {
-                this._ensureContext();
+            add(id, bpm) {
+                this._boot();
                 const now = this.ctx.currentTime;
-                if (this._gridOrigin === null) this._gridOrigin = now;
-                const gainNode = this.ctx.createGain();
-                gainNode.gain.setValueAtTime(1, now);
-                gainNode.connect(this.ctx.destination);
-                const nextTime = this._nextAlignedBeat(bpm, now);
-                this.pulses.set(id, { bpm, active: true, gainNode, nextTime });
-                this._startLoop();
+                if (this._origin === null) this._origin = now;
+                const gain = this.ctx.createGain();
+                gain.gain.setValueAtTime(1, now);
+                gain.connect(this.ctx.destination);
+                this.pulses.set(id, { bpm, active: true, gain, next: this._aligned(bpm, now) });
+                this._loop();
             }
-
-            stopPulse(id) {
-                const p = this.pulses.get(id);
-                if (!p) return;
+            stop(id) {
+                const p = this.pulses.get(id); if (!p) return;
                 p.active = false;
                 const t = this.ctx.currentTime;
-                p.gainNode.gain.cancelScheduledValues(t);
-                p.gainNode.gain.setTargetAtTime(0, t, 0.03);
-                setTimeout(() => { try { p.gainNode.disconnect(); } catch {} this.pulses.delete(id); }, 300);
+                p.gain.gain.cancelScheduledValues(t);
+                p.gain.gain.setTargetAtTime(0, t, 0.03);
+                setTimeout(() => { try { p.gain.disconnect(); } catch{} this.pulses.delete(id); }, 300);
             }
-
-            fadePulse(id, durationMs = 5000) {
-                const p = this.pulses.get(id);
-                if (!p) return;
+            fade(id, ms = 5000) {
+                const p = this.pulses.get(id); if (!p) return;
                 const t = this.ctx.currentTime;
-                p.gainNode.gain.cancelScheduledValues(t);
-                p.gainNode.gain.setValueAtTime(p.gainNode.gain.value, t);
-                p.gainNode.gain.linearRampToValueAtTime(0, t + durationMs / 1000);
-                setTimeout(() => {
-                    p.active = false;
-                    try { p.gainNode.disconnect(); } catch {}
-                    this.pulses.delete(id);
-                }, durationMs + 200);
+                p.gain.gain.cancelScheduledValues(t);
+                p.gain.gain.setValueAtTime(p.gain.gain.value, t);
+                p.gain.gain.linearRampToValueAtTime(0, t + ms / 1000);
+                setTimeout(() => { p.active = false; try { p.gain.disconnect(); } catch{} this.pulses.delete(id); }, ms + 200);
             }
-
             setBpm(id, bpm) {
-                const p = this.pulses.get(id);
-                if (!p) return;
-                const clamped = Math.max(MIN_BPM, Math.min(MAX_BPM, bpm));
-                p.bpm = clamped;
-                if (this.ctx && p.nextTime < this.ctx.currentTime) {
-                    p.nextTime = this._nextAlignedBeat(clamped, this.ctx.currentTime);
-                }
+                const p = this.pulses.get(id); if (!p) return;
+                p.bpm = Math.max(MIN_BPM, Math.min(MAX_BPM, bpm));
+                if (this.ctx && p.next < this.ctx.currentTime)
+                    p.next = this._aligned(p.bpm, this.ctx.currentTime);
             }
-
-            getActivePulses() {
-                return [...this.pulses.entries()]
-                    .filter(([, p]) => p.active)
-                    .map(([id, p]) => ({ id, bpm: p.bpm }));
+            active() {
+                return [...this.pulses.entries()].filter(([,p]) => p.active).map(([id,p]) => ({ id, bpm: p.bpm }));
             }
-
             destroy() {
-                if (this._timerID) clearTimeout(this._timerID);
-                this._timerID = null;
+                if (this._timer) clearTimeout(this._timer);
+                this._timer = null;
                 if (this.ctx) this.ctx.close();
             }
         }
 
-        // ─── EQUALIZATION LOGIC ───────────────────────────────────────────────────────
-        // Każdy puls zmierza liniowo do TARGET_BPM (50) w ciągu EQ_DURATION_MS (60s).
-        // Prędkość zmiany = (startBpm - 50) / 60s  — proporcjonalna do odległości.
-        class EqualizationLogic {
-            constructor(engine, onUpdate, onComplete) {
+        /* ═══════════════════════════════════════════════════════
+           EQUALIZATION — linear interpolation to TARGET_BPM in 60s
+           rate per pulse = (startBpm - 50) / 60  BPM/s
+        ═══════════════════════════════════════════════════════ */
+        class Equalizer {
+            constructor(engine, onTick, onDone) {
                 this.engine = engine;
-                this.onUpdate = onUpdate;
-                this.onComplete = onComplete;
-                this._interval = null;
+                this.onTick = onTick;
+                this.onDone = onDone;
+                this._iv = null;
             }
-
-            start(initialBpms) {
-                // initialBpms: Map<id, bpm>
-                this._ids = [...initialBpms.keys()];
-                this._startBpms = new Map(initialBpms);
-                this._startTime = performance.now();
-
-                this._interval = setInterval(() => {
-                    const elapsed = performance.now() - this._startTime;
-                    const t = Math.min(elapsed / EQ_DURATION_MS, 1); // 0..1 liniowo
-
-                    const current = new Map();
+            start(initial) {
+                // initial: Map<id, bpm>
+                this._starts = new Map(initial);
+                this._ids = [...initial.keys()];
+                this._t0 = performance.now();
+                this._iv = setInterval(() => {
+                    const t = Math.min((performance.now() - this._t0) / EQ_DURATION_MS, 1);
+                    const cur = new Map();
                     for (const id of this._ids) {
-                        const start = this._startBpms.get(id);
-                        // liniowa interpolacja: start → TARGET_BPM
-                        const bpm = start + (TARGET_BPM - start) * t;
-                        current.set(id, bpm);
+                        const bpm = this._starts.get(id) + (TARGET_BPM - this._starts.get(id)) * t;
+                        cur.set(id, bpm);
                         this.engine.setBpm(id, bpm);
                     }
-
-                    this.onUpdate(current, t);
-
+                    this.onTick(cur, t);
                     if (t >= 1) {
-                        clearInterval(this._interval);
-                        // Snap do dokładnie 50
+                        clearInterval(this._iv);
                         for (const id of this._ids) this.engine.setBpm(id, TARGET_BPM);
-                        this.onComplete(TARGET_BPM);
+                        this.onDone(TARGET_BPM);
                     }
                 }, TICK_MS);
             }
-
-            stop() {
-                if (this._interval) clearInterval(this._interval);
-            }
+            abort() { if (this._iv) clearInterval(this._iv); }
         }
 
-        // ─── HELPERS ─────────────────────────────────────────────────────────────────
-        const uid = () => Math.random().toString(36).slice(2, 8).toUpperCase();
+        /* ═══════════════════════════════════════════════════════
+           TINY COMPONENTS
+        ═══════════════════════════════════════════════════════ */
+        const css = {
+            root: { minHeight:'100vh', display:'flex', flexDirection:'column', color:'#c8c8c8', fontSize:12, letterSpacing:'0.04em' },
+            hdr:  { display:'flex', justifyContent:'space-between', alignItems:'center', padding:'10px 20px', borderBottom:'1px solid #161616', background:'#090909' },
+            body: { display:'flex', flex:1, overflow:'hidden' },
+            side: { width:260, flexShrink:0, borderRight:'1px solid #141414', display:'flex', flexDirection:'column', overflow:'hidden' },
+            sec:  { padding:'14px 16px', borderBottom:'1px solid #141414' },
+            lbl:  { fontSize:9, color:'#333', letterSpacing:'0.25em', marginBottom:10 },
+            inp:  { width:'100%', background:'#0d0d0d', border:'1px solid #202020', color:'#d8d8d8', padding:'6px 9px', fontSize:13, outline:'none', fontFamily:'inherit', letterSpacing:'0.1em' },
+            err:  { color:'#f94144', fontSize:10, margin:'4px 0' },
+            btnW: { width:'100%', background:'#d8d8d8', color:'#000', border:'none', padding:'7px 0', fontSize:10, letterSpacing:'0.2em', cursor:'pointer', fontFamily:'inherit', fontWeight:'bold', marginTop:6 },
+            btnE: { width:'100%', border:'1px solid', padding:'9px 0', fontSize:10, letterSpacing:'0.2em', cursor:'pointer', fontFamily:'inherit', fontWeight:'bold' },
+            trk:  { background:'#111', height:2, marginTop:6 },
+            fill: { height:'100%', transition:'width 0.1s linear' },
+            main: { flex:1, overflowY:'auto', padding:'10px 12px' },
+            row:  { display:'flex', alignItems:'center', gap:10, border:'1px solid', marginBottom:6, padding:'9px 12px', minHeight:54, transition:'border-color .3s, background .3s' },
+            sbar: { display:'flex', gap:24, padding:'7px 16px', borderTop:'1px solid #111', background:'#090909' },
+        };
 
-        function Label({ children }) {
-            return <div style={{ fontSize: 9, color: "#333", letterSpacing: "0.25em", marginBottom: 10 }}>{children}</div>;
+        function SLabel({ children }) {
+            return <div style={css.lbl}>{children}</div>;
         }
 
-        function FieldRow({ label, children }) {
-            return (
-                <div style={{ marginBottom: 8 }}>
-                    <div style={{ fontSize: 9, color: "#444", marginBottom: 4, letterSpacing: "0.18em" }}>{label}</div>
-                    {children}
-                </div>
-            );
+        function Field({ label, children }) {
+            return <div style={{ marginBottom:8 }}>
+                <div style={{ fontSize:9, color:'#444', marginBottom:4, letterSpacing:'0.18em' }}>{label}</div>
+                {children}
+            </div>;
         }
 
-        function Btn({ label, color, onClick, title, disabled, small }) {
-            return (
-                <button onClick={onClick} title={title} disabled={disabled} style={{
-                    background: "transparent",
-                    border: `1px solid ${disabled ? "#181818" : color}`,
-                    color: disabled ? "#222" : color,
-                    width: small ? 26 : 30,
-                    height: 26,
-                    fontSize: small ? 10 : 11,
-                    cursor: disabled ? "not-allowed" : "pointer",
-                    fontFamily: "inherit",
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    opacity: disabled ? 0.4 : 1,
-                    transition: "all .12s", flexShrink: 0,
-                }}>{label}</button>
-            );
+        function Btn({ label, color, onClick, title, disabled, w }) {
+            return <button
+                onClick={onClick} title={title} disabled={disabled}
+                style={{
+                    background:'transparent',
+                    border:`1px solid ${disabled?'#181818':color}`,
+                    color: disabled?'#222':color,
+                    width: w||30, height:26, fontSize:11,
+                    cursor: disabled?'not-allowed':'pointer',
+                    fontFamily:'inherit',
+                    display:'flex', alignItems:'center', justifyContent:'center',
+                    opacity: disabled?0.4:1, flexShrink:0,
+                }}
+            >{label}</button>;
         }
 
-        // ─── MAIN APP ────────────────────────────────────────────────────────────────
+        /* ═══════════════════════════════════════════════════════
+           MAIN APP
+        ═══════════════════════════════════════════════════════ */
         function App() {
-            const [entries, setEntries]           = useState([]);
-            const [nameInput, setNameInput]       = useState("");
-            const [tempoInput, setTempoInput]     = useState("");
-            const [inputError, setInputError]     = useState("");
+            /* --- list state --- */
+            const [nodes, setNodes]       = useState([]);   // {id, name, bpm}
+            const [nameIn, setNameIn]     = useState('');
+            const [bpmIn,  setBpmIn]      = useState('');
+            const [addErr, setAddErr]     = useState('');
 
-            const [activePulses, setActivePulses] = useState(new Set());
-            const [fadingPulses, setFadingPulses] = useState(new Set());
-            const [liveBpms, setLiveBpms]         = useState(new Map());
+            /* --- playback state --- */
+            const [playing, setPlaying]   = useState(new Set()); // ids
+            const [fading,  setFading]    = useState(new Set());
+            const [live,    setLive]      = useState(new Map()); // id→bpm (live during eq)
 
-            // edycja inline
-            const [editingId, setEditingId]   = useState(null);
-            const [editName, setEditName]     = useState("");
-            const [editTempo, setEditTempo]   = useState("");
-            const [editError, setEditError]   = useState("");
+            /* --- edit state --- */
+            const [editId,  setEditId]    = useState(null);
+            const [editNm,  setEditNm]    = useState('');
+            const [editBpm, setEditBpm]   = useState('');
+            const [editErr, setEditErr]   = useState('');
 
-            const [eqActive, setEqActive]     = useState(false);
-            const [eqProgress, setEqProgress] = useState(0); // 0..1
-            const [eqDone, setEqDone]         = useState(false);
+            /* --- eq state --- */
+            const [eqOn,   setEqOn]       = useState(false);
+            const [eqProg, setEqProg]     = useState(0);
+            const [eqDone, setEqDone]     = useState(false);
 
-            const [log, setLog]     = useState([]);
-            const [clock, setClock] = useState("");
+            /* --- log & clock --- */
+            const [log,   setLog]         = useState([]);
+            const [clock, setClock]       = useState('');
 
-            const engineRef = useRef(null);
-            const eqRef     = useRef(null);
+            const eng  = useRef(null);
+            const eq   = useRef(null);
 
             useEffect(() => {
-                engineRef.current = new BpmEngine();
-                const t = setInterval(() => setClock(new Date().toTimeString().slice(0, 8)), 1000);
-                return () => { engineRef.current?.destroy(); clearInterval(t); };
+                eng.current = new BpmEngine();
+                const t = setInterval(() => setClock(new Date().toTimeString().slice(0,8)), 1000);
+                return () => { eng.current.destroy(); clearInterval(t); };
             }, []);
 
-            const pushLog = useCallback((msg, color = "#888") => {
-                setLog(p => [{ ts: new Date().toTimeString().slice(0, 8), msg, color }, ...p].slice(0, 60));
+            const log$ = useCallback((msg, col='#888') => {
+                setLog(p => [{ ts: new Date().toTimeString().slice(0,8), msg, col }, ...p].slice(0, 80));
             }, []);
 
-            // ── Rejestracja ──
-            const handleAdd = () => {
-                const name = nameInput.trim().toUpperCase();
-                if (!name || !/^[A-Z0-9]+$/.test(name)) { setInputError("Błędne ID"); return; }
-                if (entries.find(e => e.name === name))   { setInputError("ID zajęte"); return; }
-                const bpm = parseInt(tempoInput);
-                if (isNaN(bpm) || bpm < MIN_BPM || bpm > MAX_BPM) { setInputError(`BPM: ${MIN_BPM}–${MAX_BPM}`); return; }
-                const entry = { id: uid(), name, bpm };
-                setEntries(p => [...p, entry]);
-                pushLog(`ZAREJESTROWANO ${name} @ ${bpm} BPM`, "#7df9d0");
-                setNameInput(""); setTempoInput(""); setInputError("");
+            /* ── ADD NODE ── */
+            const doAdd = () => {
+                const name = nameIn.trim().toUpperCase();
+                if (!name)                              { setAddErr('ID wymagane'); return; }
+                if (!/^[A-Z0-9]+$/.test(name))         { setAddErr('Tylko litery i cyfry'); return; }
+                if (nodes.find(n => n.name === name))   { setAddErr('ID już istnieje'); return; }
+                const bpm = parseInt(bpmIn);
+                if (isNaN(bpm)||bpm<MIN_BPM||bpm>MAX_BPM) { setAddErr(`BPM: ${MIN_BPM}–${MAX_BPM}`); return; }
+                const node = { id: Math.random().toString(36).slice(2,8).toUpperCase(), name, bpm };
+                setNodes(p => [...p, node]);
+                log$(`DODANO ${name} @ ${bpm} BPM`, '#7df9d0');
+                setNameIn(''); setBpmIn(''); setAddErr('');
             };
 
-            // ── Play / Stop / Fade ──
-            const handlePlay = entry => {
-                if (activePulses.has(entry.id)) return;
-                engineRef.current.addPulse(entry.id, entry.bpm);
-                setActivePulses(p => new Set([...p, entry.id]));
-                setLiveBpms(p => new Map([...p, [entry.id, entry.bpm]]));
-                pushLog(`PULS ON ${entry.name} @ ${entry.bpm} BPM`, "#7df9d0");
+            /* ── PLAY / STOP / FADE ── */
+            const doPlay = node => {
+                if (playing.has(node.id)) return;
+                eng.current.add(node.id, node.bpm);
+                setPlaying(p => new Set([...p, node.id]));
+                setLive(p => new Map([...p, [node.id, node.bpm]]));
+                log$(`PULS ON  ${node.name} @ ${node.bpm}`, '#7df9d0');
             };
-
-            const handleStop = entry => {
-                engineRef.current.stopPulse(entry.id);
-                setActivePulses(p => { const s = new Set(p); s.delete(entry.id); return s; });
-                setFadingPulses(p => { const s = new Set(p); s.delete(entry.id); return s; });
-                setLiveBpms(p => { const m = new Map(p); m.delete(entry.id); return m; });
-                pushLog(`PULS OFF ${entry.name}`, "#f94144");
+            const doStop = node => {
+                eng.current.stop(node.id);
+                setPlaying(p => { const s=new Set(p); s.delete(node.id); return s; });
+                setFading(p =>  { const s=new Set(p); s.delete(node.id); return s; });
+                setLive(p =>    { const m=new Map(p); m.delete(node.id); return m; });
+                log$(`PULS OFF ${node.name}`, '#f94144');
             };
-
-            const handleFade = entry => {
-                if (fadingPulses.has(entry.id)) return;
-                engineRef.current.fadePulse(entry.id, 5000);
-                setFadingPulses(p => new Set([...p, entry.id]));
-                pushLog(`WYCISZENIE ${entry.name}`, "#f9c74f");
+            const doFade = node => {
+                if (fading.has(node.id)) return;
+                eng.current.fade(node.id, 5000);
+                setFading(p => new Set([...p, node.id]));
+                log$(`FADE     ${node.name}`, '#f9c74f');
                 setTimeout(() => {
-                    setActivePulses(p => { const s = new Set(p); s.delete(entry.id); return s; });
-                    setFadingPulses(p => { const s = new Set(p); s.delete(entry.id); return s; });
-                    setLiveBpms(p => { const m = new Map(p); m.delete(entry.id); return m; });
+                    setPlaying(p => { const s=new Set(p); s.delete(node.id); return s; });
+                    setFading(p =>  { const s=new Set(p); s.delete(node.id); return s; });
+                    setLive(p =>    { const m=new Map(p); m.delete(node.id); return m; });
                 }, 5500);
             };
 
-            // ── Edycja ──
-            const startEdit = entry => {
-                setEditingId(entry.id);
-                setEditName(entry.name);
-                setEditTempo(String(entry.bpm));
-                setEditError("");
+            /* ── EDIT ── */
+            const startEdit = node => {
+                setEditId(node.id); setEditNm(node.name);
+                setEditBpm(String(node.bpm)); setEditErr('');
             };
-
-            const cancelEdit = () => { setEditingId(null); setEditError(""); };
-
-            const commitEdit = entry => {
-                const name = editName.trim().toUpperCase();
-                if (!name || !/^[A-Z0-9]+$/.test(name))               { setEditError("Błędne ID"); return; }
-                if (entries.find(e => e.name === name && e.id !== entry.id)) { setEditError("ID zajęte"); return; }
-                const bpm = parseInt(editTempo);
-                if (isNaN(bpm) || bpm < MIN_BPM || bpm > MAX_BPM)    { setEditError(`${MIN_BPM}–${MAX_BPM}`); return; }
-
-                setEntries(p => p.map(e => e.id === entry.id ? { ...e, name, bpm } : e));
-                if (activePulses.has(entry.id)) {
-                    engineRef.current.setBpm(entry.id, bpm);
-                    setLiveBpms(p => new Map([...p, [entry.id, bpm]]));
+            const cancelEdit = () => { setEditId(null); setEditErr(''); };
+            const saveEdit = node => {
+                const name = editNm.trim().toUpperCase();
+                if (!name || !/^[A-Z0-9]+$/.test(name))            { setEditErr('Błędne ID'); return; }
+                if (nodes.find(n => n.name===name && n.id!==node.id)) { setEditErr('ID zajęte'); return; }
+                const bpm = parseInt(editBpm);
+                if (isNaN(bpm)||bpm<MIN_BPM||bpm>MAX_BPM)          { setEditErr(`${MIN_BPM}–${MAX_BPM}`); return; }
+                setNodes(p => p.map(n => n.id===node.id ? {...n, name, bpm} : n));
+                if (playing.has(node.id)) {
+                    eng.current.setBpm(node.id, bpm);
+                    setLive(p => new Map([...p, [node.id, bpm]]));
                 }
-                pushLog(`EDYCJA ${entry.name} → ${name} @ ${bpm} BPM`, "#7df9d0");
-                setEditingId(null);
+                log$(`EDYCJA ${node.name} → ${name} @ ${bpm} BPM`, '#7df9d0');
+                setEditId(null);
             };
 
-            // ── Usuwanie ──
-            const handleDelete = entry => {
-                if (activePulses.has(entry.id)) handleStop(entry);
-                setEntries(p => p.filter(e => e.id !== entry.id));
-                if (editingId === entry.id) setEditingId(null);
-                pushLog(`USUNIĘTO ${entry.name}`, "#f94144");
+            /* ── DELETE ── */
+            const doDelete = node => {
+                if (playing.has(node.id)) doStop(node);
+                setNodes(p => p.filter(n => n.id !== node.id));
+                if (editId === node.id) setEditId(null);
+                log$(`USUNIĘTO ${node.name}`, '#f94144');
             };
 
-            // ── Equalize → liniowo do 50 BPM w 60s ──
-            const handleEqualize = () => {
-                if (eqActive) {
-                    eqRef.current?.stop();
-                    setEqActive(false); setEqProgress(0);
-                    pushLog("EQUALIZACJA PRZERWANA", "#f94144");
+            /* ── EQUALIZE ── */
+            const doEq = () => {
+                if (eqOn) {
+                    eq.current?.abort();
+                    setEqOn(false); setEqProg(0);
+                    log$('EQUALIZACJA PRZERWANA', '#f94144');
                     return;
                 }
-                const active = engineRef.current.getActivePulses();
-                if (active.length < 1) { pushLog("Brak aktywnych pulsów", "#f94144"); return; }
-
-                const initial = new Map(active.map(({ id, bpm }) => [id, bpm]));
-                const eq = new EqualizationLogic(
-                    engineRef.current,
-                    (bpms, t) => {
-                        setLiveBpms(new Map(bpms));
-                        setEqProgress(t);
-                    },
+                const cur = eng.current.active();
+                if (cur.length < 1) { log$('Brak aktywnych pulsów', '#f94144'); return; }
+                const init = new Map(cur.map(({id,bpm}) => [id,bpm]));
+                eq.current = new Equalizer(
+                    eng.current,
+                    (bpms, t) => { setLive(new Map(bpms)); setEqProg(t); },
                     done => {
-                        setEqActive(false);
-                        setEqDone(true);
-                        setEqProgress(1);
-                        // zsynchronizuj entries do 50
-                        setEntries(prev => prev.map(e =>
-                            initial.has(e.id) ? { ...e, bpm: done } : e
-                        ));
-                        pushLog(`✦ EQUALIZED @ ${done} BPM`, "#00ff88");
+                        setEqOn(false); setEqDone(true); setEqProg(1);
+                        setNodes(p => p.map(n => init.has(n.id) ? {...n, bpm: done} : n));
+                        log$(`✦ EQUALIZED @ ${done} BPM`, '#00ff88');
                     }
                 );
-                eqRef.current = eq;
-                eq.start(initial);
-                setEqActive(true);
-                setEqDone(false);
-                setEqProgress(0);
-                pushLog(`EQUALIZACJA START → cel: ${TARGET_BPM} BPM / 60s`, "#7df9d0");
+                eq.current.start(init);
+                setEqOn(true); setEqDone(false); setEqProg(0);
+                log$(`EQUALIZACJA → ${TARGET_BPM} BPM / 60s`, '#7df9d0');
             };
 
-            const activeBpmsArr = [...activePulses].map(id => liveBpms.get(id) || 0);
-            const avgBpm = activeBpmsArr.length
-                ? Math.round(activeBpmsArr.reduce((a, b) => a + b, 0) / activeBpmsArr.length)
-                : null;
+            /* ── RENDER ── */
+            const activeBpms = [...playing].map(id => live.get(id) || 0);
+            const avg = activeBpms.length ? Math.round(activeBpms.reduce((a,b)=>a+b,0)/activeBpms.length) : null;
 
             return (
-                <div style={S.root}>
-                    {/* ── Header ── */}
-                    <header style={S.header}>
+                <div style={css.root}>
+
+                    {/* HEADER */}
+                    <header style={css.hdr}>
                         <div>
-                            <div style={S.sub}>ANTHROPIC SYSTEMS · PERFORMANCE TOOL</div>
-                            <div style={S.title}>GENERAL ANESTHESIA / BPM ORCHESTRATOR</div>
+                            <div style={{ fontSize:9, color:'#333', letterSpacing:'0.2em' }}>ANTHROPIC SYSTEMS · PERFORMANCE TOOL</div>
+                            <div style={{ fontSize:14, fontWeight:'bold', color:'#e0e0e0', letterSpacing:'0.15em', marginTop:2 }}>
+                                GENERAL ANESTHESIA / BPM ORCHESTRATOR
+                            </div>
                         </div>
-                        <div style={{ textAlign: "right" }}>
-                            <div style={S.clock}>{clock || "00:00:00"}</div>
-                            <div style={S.sub}>
-                                {activePulses.size} AKTYWNYCH{avgBpm ? ` · AVG ${avgBpm} BPM` : ""}
+                        <div style={{ textAlign:'right' }}>
+                            <div style={{ fontSize:20, color:'#e8e8e8', fontVariantNumeric:'tabular-nums' }}>{clock||'00:00:00'}</div>
+                            <div style={{ fontSize:9, color:'#333', letterSpacing:'0.2em', marginTop:2 }}>
+                                {playing.size} AKTYWNYCH{avg ? ` · AVG ${avg} BPM` : ''}
                             </div>
                         </div>
                     </header>
 
-                    <div style={S.body}>
-                        {/* ── Sidebar ── */}
-                        <aside style={S.aside}>
+                    <div style={css.body}>
 
-                            {/* Rejestracja */}
-                            <section style={S.panel}>
-                                <Label>◈ REJESTRACJA WĘZŁA</Label>
-                                <FieldRow label="ID UCZESTNIKA">
-                                    <input
-                                        style={S.input}
-                                        value={nameInput}
-                                        onChange={e => { setNameInput(e.target.value.toUpperCase()); setInputError(""); }}
-                                        onKeyDown={e => e.key === "Enter" && handleAdd()}
-                                        placeholder="7X22N4"
-                                        maxLength={10}
-                                    />
-                                </FieldRow>
-                                <FieldRow label={`TEMPO (${MIN_BPM}–${MAX_BPM} BPM)`}>
-                                    <input
-                                        style={S.input}
-                                        type="number"
-                                        value={tempoInput}
-                                        onChange={e => { setTempoInput(e.target.value); setInputError(""); }}
-                                        onKeyDown={e => e.key === "Enter" && handleAdd()}
-                                        placeholder="72"
-                                        min={MIN_BPM} max={MAX_BPM}
-                                    />
-                                </FieldRow>
-                                {inputError && <div style={S.err}>▲ {inputError}</div>}
-                                <button style={S.btnWhite} onClick={handleAdd}>+ ZAREJESTRUJ</button>
+                        {/* SIDEBAR */}
+                        <aside style={css.side}>
+
+                            {/* registration */}
+                            <section style={css.sec}>
+                                <SLabel>◈ REJESTRACJA WĘZŁA</SLabel>
+                                <Field label="ID UCZESTNIKA">
+                                    <input style={css.inp} value={nameIn}
+                                        onChange={e => { setNameIn(e.target.value.toUpperCase()); setAddErr(''); }}
+                                        onKeyDown={e => e.key==='Enter' && doAdd()}
+                                        placeholder="7X22N4" maxLength={10} />
+                                </Field>
+                                <Field label={`TEMPO (${MIN_BPM}–${MAX_BPM} BPM)`}>
+                                    <input style={css.inp} type="number" value={bpmIn}
+                                        onChange={e => { setBpmIn(e.target.value); setAddErr(''); }}
+                                        onKeyDown={e => e.key==='Enter' && doAdd()}
+                                        placeholder="72" min={MIN_BPM} max={MAX_BPM} />
+                                </Field>
+                                {addErr && <div style={css.err}>▲ {addErr}</div>}
+                                <button style={css.btnW} onClick={doAdd}>+ ZAREJESTRUJ</button>
                             </section>
 
-                            {/* Equalizacja */}
-                            <section style={S.panel}>
-                                <Label>◈ EQUALIZACJA → {TARGET_BPM} BPM / 60s</Label>
-                                <button
-                                    style={{
-                                        ...S.btnEq,
-                                        borderColor: eqActive ? "#f94144" : "#00ff88",
-                                        color:       eqActive ? "#f94144" : "#00ff88",
-                                        background:  eqActive ? "rgba(249,65,68,.07)" : "rgba(0,255,136,.04)",
-                                    }}
-                                    onClick={handleEqualize}
-                                >
-                                    {eqActive ? "■ PRZERWIJ" : "⟳ EQUALIZE"}
+                            {/* equalize */}
+                            <section style={css.sec}>
+                                <SLabel>◈ EQUALIZACJA → {TARGET_BPM} BPM / 60s</SLabel>
+                                <button style={{
+                                    ...css.btnE,
+                                    borderColor: eqOn ? '#f94144' : '#00ff88',
+                                    color:       eqOn ? '#f94144' : '#00ff88',
+                                    background:  eqOn ? 'rgba(249,65,68,.07)' : 'rgba(0,255,136,.04)',
+                                }} onClick={doEq}>
+                                    {eqOn ? '■ PRZERWIJ' : '⟳ EQUALIZE'}
                                 </button>
-
-                                {(eqActive || eqDone) && (
-                                    <div style={{ marginTop: 10 }}>
-                                        <div style={{ fontSize: 9, color: eqDone ? "#00ff88" : "#f9c74f", letterSpacing: "0.15em", marginBottom: 5 }}>
+                                {(eqOn || eqDone) && (
+                                    <div style={{ marginTop:10 }}>
+                                        <div style={{ fontSize:9, letterSpacing:'0.15em', marginBottom:5, color: eqDone?'#00ff88':'#f9c74f' }}>
                                             {eqDone ? `✦ UKOŃCZONO @ ${TARGET_BPM} BPM` : `▶ ZBIEŻNOŚĆ → ${TARGET_BPM} BPM`}
                                         </div>
-                                        <div style={S.track}>
-                                            <div style={{
-                                                ...S.fill,
-                                                width: `${eqProgress * 100}%`,
-                                                background: eqDone ? "#00ff88" : "#f9c74f",
-                                                transition: "width 0.1s linear",
-                                            }} />
+                                        <div style={css.trk}>
+                                            <div style={{ ...css.fill, width:`${eqProg*100}%`, background: eqDone?'#00ff88':'#f9c74f' }} />
                                         </div>
-                                        <div style={{ fontSize: 9, color: "#444", marginTop: 4 }}>
-                                            {Math.round(eqProgress * 60)}s / 60s
+                                        <div style={{ fontSize:9, color:'#444', marginTop:4 }}>
+                                            {Math.round(eqProg*60)}s / 60s
                                         </div>
                                     </div>
                                 )}
                             </section>
 
-                            {/* Log */}
-                            <section style={{ ...S.panel, flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", borderBottom: "none" }}>
-                                <Label>◈ LOG SYSTEMOWY</Label>
-                                <div style={{ flex: 1, overflowY: "auto" }}>
-                                    {log.map((l, i) => (
-                                        <div key={i} style={{ display: "flex", gap: 6, marginBottom: 4, opacity: Math.max(0.2, 1 - i * 0.04) }}>
-                                            <span style={{ color: "#2e2e2e", flexShrink: 0, fontSize: 10 }}>{l.ts}</span>
-                                            <span style={{ color: i === 0 ? l.color : "#484848", fontSize: 10 }}>{l.msg}</span>
+                            {/* log */}
+                            <section style={{ ...css.sec, flex:1, overflow:'hidden', display:'flex', flexDirection:'column', borderBottom:'none' }}>
+                                <SLabel>◈ LOG SYSTEMOWY</SLabel>
+                                <div style={{ flex:1, overflowY:'auto' }}>
+                                    {log.map((l,i) => (
+                                        <div key={i} style={{ display:'flex', gap:6, marginBottom:4, opacity: Math.max(0.18, 1-i*0.04) }}>
+                                            <span style={{ color:'#2e2e2e', flexShrink:0, fontSize:10 }}>{l.ts}</span>
+                                            <span style={{ color: i===0 ? l.col : '#484848', fontSize:10 }}>{l.msg}</span>
                                         </div>
                                     ))}
                                 </div>
                             </section>
                         </aside>
 
-                        {/* ── Lista pulsów ── */}
-                        <main style={S.main}>
-                            {entries.length === 0 && (
-                                <div style={S.empty}>
-                                    <div style={{ fontSize: 32, marginBottom: 8, color: "#1e1e1e" }}>⊙</div>
-                                    <div>BRAK ZAREJESTROWANYCH WĘZŁÓW</div>
+                        {/* MAIN LIST */}
+                        <main style={css.main}>
+                            {nodes.length === 0 && (
+                                <div style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', height:'60vh', color:'#222', fontSize:11, letterSpacing:'0.2em' }}>
+                                    <div style={{ fontSize:32, marginBottom:8 }}>⊙</div>
+                                    <div>BRAK WĘZŁÓW</div>
                                 </div>
                             )}
 
-                            {entries.map(entry => {
-                                const isActive  = activePulses.has(entry.id);
-                                const isFading  = fadingPulses.has(entry.id);
-                                const isEditing = editingId === entry.id;
-                                const liveBpm   = liveBpms.has(entry.id) ? liveBpms.get(entry.id) : entry.bpm;
-                                const dispBpm   = Math.round(liveBpm * 10) / 10;
-                                const barPct    = Math.max(0, Math.min(100, ((liveBpm - MIN_BPM) / (MAX_BPM - MIN_BPM)) * 100));
-                                const dotColor  = isFading ? "#f9c74f" : isActive ? "#00ff88" : "#1c1c1c";
+                            {nodes.map(node => {
+                                const isOn  = playing.has(node.id);
+                                const isFad = fading.has(node.id);
+                                const isEd  = editId === node.id;
+                                const bpm   = live.has(node.id) ? live.get(node.id) : node.bpm;
+                                const disp  = Math.round(bpm * 10) / 10;
+                                const bar   = Math.max(0, Math.min(100, ((bpm-MIN_BPM)/(MAX_BPM-MIN_BPM))*100));
 
                                 return (
-                                    <div key={entry.id} style={{
-                                        ...S.row,
-                                        borderColor: isActive ? (eqActive ? "#35300f" : "#0f2e18") : "#111",
-                                        background:  isActive ? "#0b0b0b" : "#080808",
+                                    <div key={node.id} style={{
+                                        ...css.row,
+                                        background:  isOn ? '#0b0b0b' : '#080808',
+                                        borderColor: isOn ? (eqOn ? '#35300f' : '#0f2e18') : '#111',
                                     }}>
-                                        {isEditing ? (
-                                            /* ── Tryb edycji ── */
-                                            <div style={{ flex: 1, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                                        {isEd ? (
+                                            /* ─── EDIT MODE ─── */
+                                            <div style={{ flex:1, display:'flex', gap:6, alignItems:'center', flexWrap:'wrap' }}>
                                                 <input
-                                                    style={{ ...S.input, width: 80, padding: "4px 7px", fontSize: 12, marginBottom: 0 }}
-                                                    value={editName}
-                                                    onChange={e => setEditName(e.target.value.toUpperCase())}
-                                                    maxLength={10}
                                                     autoFocus
+                                                    style={{ ...css.inp, width:82, padding:'4px 7px', fontSize:12 }}
+                                                    value={editNm}
+                                                    onChange={e => setEditNm(e.target.value.toUpperCase())}
+                                                    onKeyDown={e => { if(e.key==='Enter') saveEdit(node); if(e.key==='Escape') cancelEdit(); }}
+                                                    maxLength={10}
                                                 />
                                                 <input
-                                                    style={{ ...S.input, width: 60, padding: "4px 7px", fontSize: 12, marginBottom: 0 }}
-                                                    type="number"
-                                                    value={editTempo}
-                                                    onChange={e => setEditTempo(e.target.value)}
+                                                    style={{ ...css.inp, width:62, padding:'4px 7px', fontSize:12 }}
+                                                    type="number" value={editBpm}
+                                                    onChange={e => setEditBpm(e.target.value)}
+                                                    onKeyDown={e => { if(e.key==='Enter') saveEdit(node); if(e.key==='Escape') cancelEdit(); }}
                                                     min={MIN_BPM} max={MAX_BPM}
                                                 />
-                                                {editError && <span style={{ color: "#f94144", fontSize: 10 }}>▲ {editError}</span>}
-                                                <Btn label="✓" color="#00ff88" onClick={() => commitEdit(entry)} title="Zapisz" />
-                                                <Btn label="✕" color="#f94144" onClick={cancelEdit} title="Anuluj" />
+                                                {editErr && <span style={{ color:'#f94144', fontSize:10 }}>▲ {editErr}</span>}
+                                                <Btn label="✓" color="#00ff88" onClick={() => saveEdit(node)}  title="Zapisz (Enter)" />
+                                                <Btn label="✕" color="#f94144" onClick={cancelEdit}            title="Anuluj (Esc)" />
                                             </div>
                                         ) : (
-                                            /* ── Tryb normalny ── */
+                                            /* ─── NORMAL MODE ─── */
                                             <>
-                                                {/* Dot statusu */}
+                                                {/* status dot */}
                                                 <div style={{
-                                                    width: 7, height: 7, borderRadius: "50%", flexShrink: 0,
-                                                    background: dotColor,
-                                                    boxShadow: isActive ? `0 0 7px ${isFading ? "#f9c74f70" : "#00ff8870"}` : "none",
-                                                    animation: isActive && !isFading ? "blink 1.2s ease-in-out infinite" : "none",
+                                                    width:7, height:7, borderRadius:'50%', flexShrink:0,
+                                                    background: isFad ? '#f9c74f' : isOn ? '#00ff88' : '#1c1c1c',
+                                                    boxShadow: isOn ? `0 0 7px ${isFad?'#f9c74f60':'#00ff8860'}` : 'none',
+                                                    animation: isOn && !isFad ? 'blink 1.2s ease-in-out infinite' : 'none',
                                                 }} />
 
-                                                {/* Nazwa */}
-                                                <div style={{ width: 80, flexShrink: 0 }}>
-                                                    <div style={{
-                                                        fontSize: 14, fontWeight: "bold",
-                                                        letterSpacing: "0.1em",
-                                                        color: isActive ? "#e8e8e8" : "#383838"
-                                                    }}>
-                                                        {entry.name}
-                                                    </div>
+                                                {/* name */}
+                                                <div style={{ width:80, flexShrink:0, fontSize:14, fontWeight:'bold', letterSpacing:'0.1em', color: isOn?'#e8e8e8':'#383838' }}>
+                                                    {node.name}
                                                 </div>
 
-                                                {/* BPM + pasek */}
-                                                <div style={{ flex: 1, minWidth: 0 }}>
-                                                    <div style={{ display: "flex", alignItems: "baseline", gap: 4, marginBottom: 4 }}>
-                                                        <span style={{
-                                                            fontSize: 20,
-                                                            fontVariantNumeric: "tabular-nums",
-                                                            transition: "color .5s",
-                                                            color: isActive ? (eqActive ? "#f9c74f" : "#d8d8d8") : "#282828",
-                                                        }}>
-                                                            {dispBpm}
+                                                {/* bpm + bar */}
+                                                <div style={{ flex:1, minWidth:0 }}>
+                                                    <div style={{ display:'flex', alignItems:'baseline', gap:4, marginBottom:4 }}>
+                                                        <span style={{ fontSize:20, fontVariantNumeric:'tabular-nums', transition:'color .5s', color: isOn?(eqOn?'#f9c74f':'#d8d8d8'):'#282828' }}>
+                                                            {disp}
                                                         </span>
-                                                        <span style={{ fontSize: 9, color: "#3a3a3a", letterSpacing: "0.15em" }}>BPM</span>
+                                                        <span style={{ fontSize:9, color:'#3a3a3a', letterSpacing:'0.15em' }}>BPM</span>
                                                     </div>
-                                                    <div style={{ background: "#111", height: 2 }}>
-                                                        <div style={{
-                                                            height: "100%",
-                                                            width: `${barPct}%`,
-                                                            background: isActive ? (eqActive ? "#f9c74f" : "#00ff88") : "#1c1c1c",
-                                                            transition: "width .08s linear, background .5s",
-                                                        }} />
+                                                    <div style={{ background:'#111', height:2 }}>
+                                                        <div style={{ height:'100%', width:`${bar}%`, transition:'width .08s linear, background .5s', background: isOn?(eqOn?'#f9c74f':'#00ff88'):'#1c1c1c' }} />
                                                     </div>
                                                 </div>
 
-                                                {/* Przyciski sterowania */}
-                                                <div style={{ display: "flex", gap: 4, flexShrink: 0, alignItems: "center" }}>
-                                                    {!isActive
-                                                        ? <Btn label="▶" color="#00ff88" onClick={() => handlePlay(entry)} title="Odtwórz" />
+                                                {/* controls */}
+                                                <div style={{ display:'flex', gap:4, flexShrink:0, alignItems:'center' }}>
+                                                    {/* play / stop / fade */}
+                                                    {!isOn
+                                                        ? <Btn label="▶" color="#00ff88" onClick={() => doPlay(node)} title="Odtwórz" />
                                                         : <>
-                                                            <Btn label="◼" color="#f94144" onClick={() => handleStop(entry)} title="Zatrzymaj" />
-                                                            <Btn label={isFading ? "…" : "↓"} color="#f9c74f"
-                                                                 onClick={() => !isFading && handleFade(entry)} title="Wycisz" disabled={isFading} />
+                                                            <Btn label="◼" color="#f94144" onClick={() => doStop(node)} title="Zatrzymaj" />
+                                                            <Btn label={isFad?'…':'↓'} color="#f9c74f" disabled={isFad} onClick={() => doFade(node)} title="Wycisz" />
                                                           </>
                                                     }
-                                                    <div style={{ width: 1, height: 18, background: "#1e1e1e", margin: "0 2px" }} />
-                                                    <Btn label="✎" color="#7df9d0" onClick={() => startEdit(entry)} title="Edytuj" small />
-                                                    <Btn label="✕" color="#444"    onClick={() => handleDelete(entry)} title="Usuń" small />
+                                                    {/* divider */}
+                                                    <div style={{ width:1, height:18, background:'#1e1e1e', margin:'0 2px' }} />
+                                                    {/* edit */}
+                                                    <Btn label="✎" color="#7df9d0" onClick={() => startEdit(node)} title="Edytuj" w={26} />
+                                                    {/* delete */}
+                                                    <Btn label="✕" color="#555"    onClick={() => doDelete(node)}  title="Usuń"   w={26} />
                                                 </div>
                                             </>
                                         )}
@@ -586,98 +530,25 @@
                         </main>
                     </div>
 
-                    {/* ── Status bar ── */}
-                    <footer style={S.statusBar}>
+                    {/* STATUS BAR */}
+                    <footer style={css.sbar}>
                         {[
-                            { k: "WĘZŁY",    v: entries.length,    c: "#555" },
-                            { k: "AKTYWNE",  v: activePulses.size, c: "#00ff88" },
-                            { k: "WYCISZANE",v: fadingPulses.size, c: "#f9c74f" },
-                            eqActive ? { k: "EQ", v: `${Math.round(eqProgress * 100)}%`, c: "#f9c74f" } : null,
+                            { k:'WĘZŁY',     v: nodes.length,   c:'#555'    },
+                            { k:'AKTYWNE',   v: playing.size,   c:'#00ff88' },
+                            { k:'WYCISZANE', v: fading.size,    c:'#f9c74f' },
+                            eqOn ? { k:'EQ', v:`${Math.round(eqProg*100)}%`, c:'#f9c74f' } : null,
                         ].filter(Boolean).map(x => (
-                            <div key={x.k} style={{ display: "flex", gap: 6, alignItems: "baseline" }}>
-                                <span style={{ fontSize: 9, color: "#2e2e2e", letterSpacing: "0.2em" }}>{x.k}</span>
-                                <span style={{ fontSize: 14, color: x.c }}>{x.v}</span>
+                            <div key={x.k} style={{ display:'flex', gap:6, alignItems:'baseline' }}>
+                                <span style={{ fontSize:9, color:'#2e2e2e', letterSpacing:'0.2em' }}>{x.k}</span>
+                                <span style={{ fontSize:14, color:x.c }}>{x.v}</span>
                             </div>
                         ))}
                     </footer>
-
-                    <style>{`
-                        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.2} }
-                        * { box-sizing: border-box; }
-                        input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; }
-                        input[type=number] { -moz-appearance: textfield; }
-                        ::-webkit-scrollbar { width: 3px; }
-                        ::-webkit-scrollbar-track { background: #090909; }
-                        ::-webkit-scrollbar-thumb { background: #202020; }
-                    `}</style>
                 </div>
             );
         }
 
-        // ─── STYLE TOKENS ─────────────────────────────────────────────────────────────
-        const S = {
-            root: {
-                fontFamily: "'Courier New', Courier, monospace",
-                background: "#080808", color: "#c8c8c8",
-                minHeight: "100vh", display: "flex", flexDirection: "column",
-                fontSize: 12, letterSpacing: "0.04em",
-            },
-            header: {
-                borderBottom: "1px solid #161616", padding: "10px 20px",
-                display: "flex", justifyContent: "space-between", alignItems: "center",
-                background: "#090909",
-            },
-            sub:   { fontSize: 9, color: "#333", letterSpacing: "0.2em", marginBottom: 2 },
-            title: { fontSize: 14, fontWeight: "bold", color: "#e0e0e0", letterSpacing: "0.15em" },
-            clock: { fontSize: 20, color: "#e8e8e8", fontVariantNumeric: "tabular-nums" },
-            body:  { display: "flex", flex: 1, overflow: "hidden" },
-            aside: {
-                width: 260, borderRight: "1px solid #141414",
-                display: "flex", flexDirection: "column", overflow: "hidden", flexShrink: 0,
-            },
-            panel:    { padding: "14px 16px", borderBottom: "1px solid #141414" },
-            input: {
-                width: "100%", background: "#0d0d0d", border: "1px solid #202020",
-                color: "#d8d8d8", padding: "6px 9px", fontSize: 13,
-                letterSpacing: "0.1em", outline: "none",
-                fontFamily: "'Courier New', Courier, monospace",
-                marginBottom: 0,
-            },
-            err:      { color: "#f94144", fontSize: 10, marginBottom: 6 },
-            btnWhite: {
-                width: "100%", background: "#d8d8d8", color: "#000", border: "none",
-                padding: "7px 0", fontSize: 10, letterSpacing: "0.2em",
-                cursor: "pointer", fontFamily: "inherit", fontWeight: "bold", marginTop: 6,
-            },
-            btnEq: {
-                width: "100%", border: "1px solid", padding: "9px 0",
-                fontSize: 10, letterSpacing: "0.2em",
-                cursor: "pointer", fontFamily: "inherit", fontWeight: "bold",
-            },
-            track: { background: "#111", height: 2, marginTop: 4 },
-            fill:  { height: "100%" },
-            main:  {
-                flex: 1, overflowY: "auto", padding: "10px 12px",
-            },
-            row: {
-                display: "flex", alignItems: "center", gap: 10,
-                border: "1px solid", marginBottom: 6, padding: "9px 12px",
-                transition: "border-color .3s, background .3s", minHeight: 52,
-            },
-            statusBar: {
-                borderTop: "1px solid #111", padding: "7px 16px",
-                display: "flex", gap: 24, background: "#090909",
-            },
-            empty: {
-                display: "flex", alignItems: "center", justifyContent: "center",
-                height: "60vh", color: "#222", fontSize: 11, letterSpacing: "0.2em",
-                flexDirection: "column",
-            },
-        };
-
-        // ─── MOUNT ───────────────────────────────────────────────────────────────────
-        const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(<App />);
+        ReactDOM.createRoot(document.getElementById('root')).render(<App />);
     </script>
 </body>
 </html>
