@@ -7,6 +7,8 @@
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { background: #080808; font-family: 'Courier New', Courier, monospace; }
@@ -20,6 +22,18 @@
 </head>
 <body>
     <div id="root"></div>
+    <script>
+    firebase.initializeApp({
+      apiKey:"AIzaSyBzo6qVmam_u-H2asl3GIPRU_JBbMCPN9g",
+      authDomain:"general-anesthesia-cf511.firebaseapp.com",
+      databaseURL:"https://general-anesthesia-cf511-default-rtdb.europe-west1.firebasedatabase.app",
+      projectId:"general-anesthesia-cf511",
+      storageBucket:"general-anesthesia-cf511.firebasestorage.app",
+      messagingSenderId:"839292271507",
+      appId:"1:839292271507:web:42a6028e0ff992afb50666"
+    });
+    const firebaseDb = firebase.database();
+    </script>
     <script type="text/babel">
         const { useState, useEffect, useRef, useCallback } = React;
 
@@ -215,6 +229,9 @@
             const [nameIn, setNameIn]     = useState('');
             const [bpmIn,  setBpmIn]      = useState('');
             const [addErr, setAddErr]     = useState('');
+            const [fbStatus, setFbStatus]   = useState('');
+            const [preregistered, setPreregistered] = useState([]);
+            const [selectedGuest, setSelectedGuest] = useState(null);
 
             /* --- playback state --- */
             const [playing, setPlaying]   = useState(new Set()); // ids
@@ -249,6 +266,18 @@
                 setLog(p => [{ ts: new Date().toTimeString().slice(0,8), msg, col }, ...p].slice(0, 80));
             }, []);
 
+            /* ── FIREBASE: load preregistered guests ── */
+            useEffect(() => {
+                firebaseDb.ref('/preregistered').on('value', snap => {
+                    const data = snap.val() || {};
+                    const list = Object.values(data)
+                        .filter(g => g.nickname)
+                        .sort((a,b) => (a.registeredAt||0) - (b.registeredAt||0));
+                    setPreregistered(list);
+                });
+                return () => firebaseDb.ref('/preregistered').off();
+            }, []);
+
             /* ── ADD NODE ── */
             const doAdd = () => {
                 const name = nameIn.trim().toUpperCase();
@@ -260,7 +289,41 @@
                 const node = { id: Math.random().toString(36).slice(2,8).toUpperCase(), name, bpm };
                 setNodes(p => [...p, node]);
                 log$(`REGISTERED ${name} @ ${bpm} BPM`, '#7df9d0');
-                setNameIn(''); setBpmIn(''); setAddErr('');
+
+                // Save to Firebase
+                const role = selectedGuest ? selectedGuest.rolePreference : null;
+                const nickname = selectedGuest ? selectedGuest.nickname : null;
+                firebaseDb.ref('/participants/' + name).once('value').then(snap => {
+                    const existing = snap.val();
+                    const now = Date.now();
+                    if (!existing) {
+                        firebaseDb.ref('/participants').once('value').then(allSnap => {
+                            const all = allSnap.val() || {};
+                            const num = Object.keys(all).length + 1;
+                            const path = num<=10?'A':num<=20?'B':'C';
+                            firebaseDb.ref('/participants/' + name).set({
+                                id: name, num, path,
+                                status: 'role_pending',
+                                currentStation: null, stepIndex: 0,
+                                registeredAt: now, stationStartedAt: null,
+                                transitStartedAt: null, transitDur: null,
+                                transitTo: null, holdUntil: null, stationCap: null,
+                                instruction: 'Please take a seat and wait for your appointment.',
+                                instructionAt: now, checkedIn: false,
+                                rolePreference: role,
+                                nickname: nickname,
+                                bpm: bpm,
+                            });
+                            firebaseDb.ref('/occupancy/s3').transaction(v => (v||0)+1);
+                            log$(`Firebase: ${name} → path ${path} · role: ${role||'pending'}`, '#00ff88');
+                        });
+                    } else {
+                        firebaseDb.ref('/participants/' + name).update({ bpm, rolePreference: role||existing.rolePreference });
+                        log$(`Firebase: ${name} BPM updated → ${bpm}`, '#7df9d0');
+                    }
+                }).catch(e => log$(`Firebase error: ${e.message}`, '#f94144'));
+
+                setNameIn(''); setBpmIn(''); setAddErr(''); setSelectedGuest(null); setFbStatus('');
             };
 
             /* ── PLAY / STOP / FADE ── */
@@ -375,11 +438,50 @@
                             {/* registration */}
                             <section style={css.sec}>
                                 <SLabel>◈ NODE REGISTRATION</SLabel>
-                                <Field label="PARTICIPANT ID">
+
+                                <Field label="SELECT REGISTERED GUEST">
+                                    <select
+                                        style={{...css.inp, color: selectedGuest?'#00ff88':'#555', cursor:'pointer', background:'#0d0d0d'}}
+                                        value={selectedGuest ? selectedGuest.nickname : ''}
+                                        onChange={e => {
+                                            const guest = preregistered.find(g => g.nickname === e.target.value);
+                                            setSelectedGuest(guest || null);
+                                        }}
+                                    >
+                                        <option value="">— select name —</option>
+                                        {preregistered.map((g,i) => (
+                                            <option key={i} value={g.nickname}>
+                                                {g.nickname} · {g.rolePreference==='active'?'● active':'○ observer'} · {g.timeslot||''}
+                                            </option>
+                                        ))}
+                                    </select>
+                                    {selectedGuest && (
+                                        <div style={{fontSize:9,color:'#00ff88',marginTop:4,letterSpacing:'0.1em'}}>
+                                            Role: {selectedGuest.rolePreference} · Slot: {selectedGuest.timeslot||'—'}
+                                        </div>
+                                    )}
+                                    {preregistered.length === 0 && (
+                                        <div style={{fontSize:9,color:'#444',marginTop:4}}>No pre-registrations yet</div>
+                                    )}
+                                </Field>
+
+                                <Field label="PARTICIPANT ID (from card)">
                                     <input style={css.inp} value={nameIn}
-                                        onChange={e => { setNameIn(e.target.value.toUpperCase()); setAddErr(''); }}
+                                        onChange={e => {
+                                            const val = e.target.value.toUpperCase();
+                                            setNameIn(val); setAddErr('');
+                                            if(val.length >= 4) {
+                                                firebaseDb.ref('/allowedIds/'+val).once('value').then(s => {
+                                                    if(!s.exists()){setFbStatus('⚠ not in allowed list');return;}
+                                                    firebaseDb.ref('/participants/'+val).once('value').then(ps => {
+                                                        setFbStatus(ps.exists()?'↺ already registered':'✓ valid ID');
+                                                    });
+                                                });
+                                            } else { setFbStatus(''); }
+                                        }}
                                         onKeyDown={e => e.key==='Enter' && doAdd()}
                                         placeholder="7X22N4" maxLength={10} />
+                                    {fbStatus && <div style={{fontSize:9,color:fbStatus.startsWith('✓')?'#00ff88':fbStatus.startsWith('↺')?'#f9c74f':'#f94144',marginTop:4,letterSpacing:'0.1em'}}>{fbStatus}</div>}
                                 </Field>
                                 <Field label={`TEMPO (${MIN_BPM}–${MAX_BPM} BPM)`}>
                                     <input style={css.inp} type="number" value={bpmIn}
