@@ -317,8 +317,14 @@
                             log$(`Firebase: ${name} → path ${path} · role: ${role||'pending'}`, '#00ff88');
                         });
                     } else {
-                        firebaseDb.ref('/participants/' + name).update({ bpm, rolePreference: role||existing.rolePreference });
-                        log$(`Firebase: ${name} BPM updated → ${bpm}`, '#7df9d0');
+                        firebaseDb.ref('/participants/' + name).update({
+                            bpm,
+                            rolePreference: role||existing.rolePreference,
+                            status: 'waiting_s3',
+                            currentStation: 's3',
+                            path: existing.path || 'A',
+                        });
+                        log$(`Firebase: ${name} re-registered → waiting · role: ${role||existing.rolePreference}`, '#7df9d0');
                     }
                 }).catch(e => log$(`Firebase error: ${e.message}`, '#f94144'));
 
