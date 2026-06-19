@@ -272,7 +272,7 @@
                     const data = snap.val() || {};
                     const list = Object.values(data)
                         .filter(g => g.nickname)
-                        .sort((a,b) => (a.registeredAt||0) - (b.registeredAt||0));
+                        .sort((a,b)=>{const ta=a.timeslot||'99:99',tb=b.timeslot||'99:99';return ta!==tb?ta.localeCompare(tb):(a.registeredAt||0)-(b.registeredAt||0);});
                     setPreregistered(list);
                 });
                 return () => firebaseDb.ref('/preregistered').off();
