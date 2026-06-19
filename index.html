@@ -299,11 +299,11 @@
                         firebaseDb.ref('/participants').once('value').then(allSnap => {
                             const all = allSnap.val() || {};
                             const num = Object.keys(all).length + 1;
-                            const path = num<=10?'A':num<=20?'B':'C';
+                            const path = 'A'; // single path for tryout
                             firebaseDb.ref('/participants/' + name).set({
                                 id: name, num, path,
-                                status: 'role_pending',
-                                currentStation: null, stepIndex: 0,
+                                status: 'waiting_s3',
+                                currentStation: 's3', stepIndex: 0,
                                 registeredAt: now, stationStartedAt: null,
                                 transitStartedAt: null, transitDur: null,
                                 transitTo: null, holdUntil: null, stationCap: null,
